@@ -1,0 +1,8 @@
+{
+  "constraints": [
+    "Do not reference paths that no longer exist (e.g. /old/config/location)",
+    "If the job posts output to a messaging service, use the provided helper script directly — do not invent auth or access-check steps",
+    "Preserve any time-budget instruction from the original message",
+    "If the original relies on environment variables (e.g. API_KEY), keep the variable name unchanged"
+  ]
+}

@@ -1,0 +1,17 @@
+[
+  {
+    "mode": "stale_config_path",
+    "match_any": ["/old/config/location", "/deprecated/path"],
+    "description": "Prompt still references a path that was moved/removed"
+  },
+  {
+    "mode": "quota_exceeded",
+    "match_any": ["429 Too Many Requests", "rate limit exceeded", "quota exhausted"],
+    "description": "Upstream API rate limit hit"
+  },
+  {
+    "mode": "auth_failure",
+    "match_any": ["401 Unauthorized", "403 Forbidden", "invalid credentials"],
+    "description": "Auth failed — token expired or missing scope"
+  }
+]

@@ -1,0 +1,36 @@
+{
+  "defaults": {
+    "success_patterns": ["HEARTBEAT_OK"],
+    "failure_patterns": ["Cannot find module", "ECONNREFUSED"],
+    "required_absent": []
+  },
+  "failure_mode_checks": {
+    "module_not_found": {
+      "description": "Script crashed because a required module was missing",
+      "patch_must_contain": [],
+      "patch_must_not_contain": []
+    },
+    "network_error": {
+      "description": "Job failed to reach a remote host",
+      "patch_must_contain": [],
+      "patch_must_not_contain": []
+    },
+    "timeout": {
+      "description": "Job ran past its timeout budget",
+      "patch_must_contain": [],
+      "patch_must_not_contain": []
+    },
+    "stale_config_path": {
+      "description": "Prompt references an old/moved path",
+      "patch_must_contain": [],
+      "patch_must_not_contain": ["/old/config/location"]
+    }
+  },
+  "jobs": {
+    "daily-status-report-001": {
+      "success_patterns": ["📊 Daily Status"],
+      "failure_patterns": ["api.example.internal"],
+      "required_absent": ["api.example.internal"]
+    }
+  }
+}
