@@ -2,10 +2,10 @@
 /**
  * evolution-review.js — Post candidate variant reviews for human approval, apply approved variants
  *
- * Reads pending variants from data/candidate-variants.json, formats a diff
- * summary + eval + dry-run verdict, and surfaces them for human review. If
- * DISCORD_POST is set (a path to a script that takes `<channel_id> <message>`),
- * reviews are posted to that channel. Otherwise they are printed to stdout.
+ * Reads pending variants from data/candidate-variants.json, formats a compact
+ * diff block (one proposal per message), and surfaces them for human review. If
+ * DISCORD_POST is set (path to a script that takes `<channel_id> <message>`),
+ * reviews are posted there. Otherwise printed to stdout.
  *
  * NEVER auto-applies — always requires explicit human approval.
  *
@@ -38,63 +38,33 @@ const JOBS_FILE     = path.join(WORKSPACE, 'crons', 'jobs.json');
 const DISCORD_POST   = process.env.DISCORD_POST || '';
 const REVIEW_CHANNEL = process.env.REVIEW_CHANNEL || '';
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-function diffSummary(original, patched) {
-  const oLines = original.split('\n');
-  const pLines = patched.split('\n');
-  const changes = [];
-  for (let i = 0; i < Math.max(oLines.length, pLines.length); i++) {
-    if ((oLines[i] || '') !== (pLines[i] || '')) {
-      const oSnip = (oLines[i] || '').slice(0, 100);
-      const pSnip = (pLines[i] || '').slice(0, 100);
-      if (oSnip || pSnip) changes.push({ line: i + 1, from: oSnip, to: pSnip });
-    }
-    if (changes.length >= 3) { changes.push({ truncated: true }); break; }
-  }
-  return changes;
-}
+// ── Format — compact single-diff message ─────────────────────────────────────
+function formatReview(record) {
+  const { id, job_name, failure_mode, variants, consecutive_count } = record;
+  const v = variants[0]; // single-change diff — one variant per proposal
+  if (!v) return null;
 
-function formatReview(record, job) {
-  const { id, job_name, failure_mode, generated_at, variants } = record;
-  const date = generated_at.slice(0, 10);
-  const passing = variants.filter(v => v.eval?.pass);
+  const dryRunIcon = !v.dry_run ? '' :
+    v.dry_run.verdict === 'pass' ? '🟢' :
+    v.dry_run.verdict === 'warn' ? '🟡' : '🔴';
+  const dryRunStr = v.dry_run
+    ? `${dryRunIcon} dry-run: ${v.dry_run.verdict} (${v.dry_run.past_failures_addressed.length}/${v.dry_run.past_modes_seen} past modes addressed)`
+    : '';
 
-  let body = `🧬 **Evolution Review** — ${date}\n`;
-  body += `**Job:** ${job_name}\n`;
-  body += `**Failure mode:** \`${failure_mode}\`\n`;
-  body += `**Candidate ID:** \`${id}\`\n`;
-  body += `**Variants:** ${variants.length} generated, ${passing.length} pass eval gates\n\n`;
+  const sc = v.single_change || {};
+  const removeSnip = (sc.remove || '').slice(0, 120);
+  const addSnip    = (sc.add    || '').slice(0, 120);
+  const diffBlock  = removeSnip || addSnip
+    ? `\`\`\`diff\n${removeSnip ? `- ${removeSnip}\n` : ''}${addSnip ? `+ ${addSnip}\n` : ''}\`\`\``
+    : '(no diff — see full message in candidate-variants.json)';
 
-  for (const v of variants) {
-    const evalStatus = v.eval?.pass ? '✅ PASS' : v.eval?.skip ? '⏭️ SKIP' : `❌ FAIL: ${v.eval?.reason}`;
-    body += `**${v.id}** [${evalStatus}]\n`;
-    body += `> ${v.reasoning}\n`;
-
-    if (v.dry_run) {
-      const d = v.dry_run;
-      const icon = d.verdict === 'pass' ? '🟢' : d.verdict === 'warn' ? '🟡' : '🔴';
-      body += `${icon} Dry-run: ${d.verdict} (${d.past_failures_addressed.length}/${d.past_modes_seen} past modes fixed, score ${d.score})`;
-      if (d.cross_contamination.length) {
-        body += ` — contamination: ${d.cross_contamination.map(c => '`' + c.pattern + '`').join(', ')}`;
-      }
-      body += '\n';
-    }
-
-    if (job?.message) {
-      const changes = diffSummary(job.message, v.message);
-      if (changes.length > 0 && !changes[0].truncated) {
-        body += 'Changes: ';
-        body += changes.slice(0, 2)
-          .map(c => c.truncated ? '...' : `line ${c.line}: \`${c.from.slice(0, 60)}\` → \`${c.to.slice(0, 60)}\``)
-          .join(', ');
-        body += '\n';
-      }
-    }
-    body += '\n';
-  }
-
-  body += `**To apply:** \`node evolution-review.js --apply-variant ${id} <v1|v2>\`\n`;
-  body += `**To skip:** edit data/candidate-variants.json and set status=skipped`;
+  let body = `🔧 **Proposal — ${job_name}** (${consecutive_count || '3+'}× consecutive \`${failure_mode}\`)\n`;
+  body += `**Diagnosis:** ${v.diagnosis || v.reasoning || '(none)'}\n`;
+  body += `**Change:** ${sc.description || '(see diff)'}\n`;
+  body += `${diffBlock}\n`;
+  if (dryRunStr) body += `${dryRunStr}\n`;
+  body += `**Expected:** ${v.expected_fix || '(see reasoning)'}\n`;
+  body += `\nReply: \`apply ${id}\` to apply · \`skip ${id}\` to dismiss`;
 
   return body.slice(0, 1900);
 }
@@ -120,7 +90,7 @@ function deliverReview(message) {
   }
 }
 
-// ── Apply an approved variant ───────────────────────────────────────────────
+// ── Apply an approved variant ─────────────────────────────────────────────────
 function applyVariant(candidateId, variantId) {
   if (!fs.existsSync(VARIANTS_FILE)) { console.error('No variants file found'); process.exit(1); }
   const candidates = JSON.parse(fs.readFileSync(VARIANTS_FILE, 'utf8'));
@@ -153,7 +123,7 @@ function applyVariant(candidateId, variantId) {
   console.log('HEARTBEAT_OK');
 }
 
-// ── Main ────────────────────────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────────────
 const args      = process.argv.slice(2);
 const idArg     = args.includes('--id') ? args[args.indexOf('--id') + 1] : null;
 const listMode  = args.includes('--list');
@@ -199,8 +169,8 @@ const toPost = idArg ? pending.filter(c => c.id === idArg) : pending;
 if (toPost.length === 0) { console.log('No pending variant reviews to post.'); process.exit(0); }
 
 for (const record of toPost) {
-  const job = jobsById[record.job_id];
-  const message = formatReview(record, job);
+  const message = formatReview(record);
+  if (!message) { console.log(`Skipping ${record.id} — no formattable variant`); continue; }
   console.log(`\nReview for: ${record.job_name}`);
   deliverReview(message);
   record.status = 'review_posted';

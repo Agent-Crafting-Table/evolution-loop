@@ -2,20 +2,15 @@
 /**
  * variant-gen.js — Generate candidate prompt variants for failing cron jobs
  *
- * When a cron job has a recurring failure mode that can't be auto-patched,
- * this script asks Claude to propose 2 improved prompt variants, then scores
- * each variant twice:
- *   1. Static eval (cron-eval.js — gate 1-5)
- *   2. Historical replay (variant-test.js — dry-run against past traces,
- *      with cross-contamination detection)
- *
- * Variants are saved to data/candidate-variants.json with status=pending_review.
- * They are NEVER auto-applied — always require human approval via
- * evolution-review.js.
+ * When a cron job has 3+ *consecutive* failures of the same mode that can't be
+ * auto-patched, this script uses Claude (Reflexion pattern) to produce exactly
+ * ONE diagnosis + ONE targeted change per proposal. Variants are scored by
+ * cron-eval.js (static) and variant-test.js (dry-run against history) before
+ * being presented for human approval via evolution-review.js.
  *
  * Usage:
  *   node variant-gen.js --job-id <id> --mode <failure_mode>
- *   node variant-gen.js --pending              # process all medium-risk failures from cron-performance.json
+ *   node variant-gen.js --pending              # process all 3+ consecutive failures
  *
  * Reads:
  *   crons/jobs.json                      job registry
@@ -51,10 +46,10 @@ const MAX_PER_RUN = parseInt(process.env.MAX_PER_RUN || '3', 10);
 const { evalPatch } = require('./cron-eval');
 const { dryRun }    = require('./variant-test');
 
-// Default constraints — user can extend these via data/variant-constraints.json
+// Default constraints — extend via data/variant-constraints.json
 const DEFAULT_CONSTRAINTS = [
   "Keep the job's original intent and outcome unchanged",
-  "Must be complete (not just a patch — write the full message text)",
+  "Must be a complete message (not just a patch snippet)",
   "If the original ends with a success marker (e.g. HEARTBEAT_OK), keep it",
 ];
 
@@ -69,7 +64,7 @@ function loadConstraints() {
   }
 }
 
-// ── Meta-prompt ─────────────────────────────────────────────────────────────
+// ── Reflexion meta-prompt — single diagnosis + single change ─────────────────
 function buildVariantPrompt(job, mode, traces) {
   const constraints = loadConstraints();
   const recentTraces = traces?.slice(-3) || [];
@@ -81,43 +76,48 @@ function buildVariantPrompt(job, mode, traces) {
 
   const constraintsBlock = constraints.map((c, i) => `${i + 1}. ${c}`).join('\n');
 
-  return `You are improving a cron job instruction that is repeatedly failing.
+  return `You are diagnosing a cron job instruction that is systematically failing (3+ consecutive failures).
 
 JOB NAME: ${job.name}
 FAILURE MODE: ${mode}
-CURRENT MESSAGE (the cron job prompt sent to a subagent):
+CURRENT MESSAGE (the cron job prompt sent to a Claude subagent):
 ---
 ${job.message.slice(0, 2000)}${job.message.length > 2000 ? '\n[...truncated]' : ''}
 ---
 
-RECENT EXECUTION TRACES (showing what actually happened):
+RECENT EXECUTION TRACES (last 3 failures):
 ---
-${traceExcerpts || 'No traces available — use your best judgment based on the failure mode.'}
+${traceExcerpts || 'No traces available — diagnose from the failure mode and message.'}
 ---
 
-TASK: Generate exactly 2 improved variants of the cron job message that fix the root cause of the failure mode "${mode}".
+TASK: Using the Reflexion pattern — diagnose the root cause in one sentence, then generate exactly ONE targeted change that fixes it.
 
-CONSTRAINTS each variant MUST satisfy:
+RULES:
+1. ONE change only — one block added, one line modified, or one timeout adjusted. Not a full rewrite.
+2. The change must be the minimum edit to fix the diagnosed root cause.
+
+CONSTRAINTS:
 ${constraintsBlock}
 
-Output ONLY valid JSON in this exact format, no markdown, no explanation:
+Output ONLY valid JSON, no markdown, no explanation:
 {
   "variants": [
     {
       "id": "v1",
-      "reasoning": "One sentence explaining what this variant changes and why",
-      "message": "The complete improved cron job message..."
-    },
-    {
-      "id": "v2",
-      "reasoning": "One sentence explaining a different approach",
-      "message": "The complete improved cron job message (different approach)..."
+      "diagnosis": "One sentence: fails because [specific root cause]",
+      "single_change": {
+        "description": "One sentence describing what this change does",
+        "remove": "exact text to remove (or empty string if addition only)",
+        "add": "exact replacement text (or new text to append)"
+      },
+      "message": "The complete updated cron job message with exactly the one change applied",
+      "expected_fix": "One sentence: why this specific change will stop the failure"
     }
   ]
 }`;
 }
 
-// ── Spawn Claude ────────────────────────────────────────────────────────────
+// ── Spawn Claude ─────────────────────────────────────────────────────────────
 function generateVariants(prompt) {
   const result = spawnSync(
     'claude',
@@ -140,7 +140,7 @@ function generateVariants(prompt) {
   return JSON.parse(jsonMatch[0]);
 }
 
-// ── Load traces in either format ────────────────────────────────────────────
+// ── Load traces in either format ─────────────────────────────────────────────
 function loadJobTraces(jobId) {
   const allTraces = fs.existsSync(TRACES_FILE)
     ? JSON.parse(fs.readFileSync(TRACES_FILE, 'utf8'))
@@ -161,12 +161,24 @@ function loadJobTraces(jobId) {
   return allTraces[jobId]?.traces || [];
 }
 
-// ── Process one job+mode ────────────────────────────────────────────────────
+// ── Count consecutive trailing failures per mode ──────────────────────────────
+function getConsecutiveStreaks(runs) {
+  const sorted = [...runs].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  const streak = {};
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const run = sorted[i];
+    if (run.fix_applied || run.outcome === 'success') break;
+    if (run.failure_mode) streak[run.failure_mode] = (streak[run.failure_mode] || 0) + 1;
+  }
+  return streak;
+}
+
+// ── Process one job+mode ──────────────────────────────────────────────────────
 function processFailure(jobId, mode, jobsById) {
   const job = jobsById[jobId];
   if (!job) { console.log(`Job ${jobId} not found`); return null; }
 
-  console.log(`\nGenerating variants for: ${job.name} (${mode})`);
+  console.log(`\nGenerating variant for: ${job.name} (${mode})`);
 
   const jobTraces = loadJobTraces(jobId);
   const prompt    = buildVariantPrompt(job, mode, jobTraces);
@@ -209,7 +221,7 @@ function processFailure(jobId, mode, jobsById) {
   return record;
 }
 
-// ── Main ────────────────────────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────────────
 const args     = process.argv.slice(2);
 const jobIdArg = args.find(a => a.startsWith('--job-id='))?.split('=')[1]
               || (args.includes('--job-id') ? args[args.indexOf('--job-id') + 1] : null);
@@ -242,14 +254,9 @@ if (pending) {
 
   let processed = 0;
   for (const [jobId, data] of Object.entries(perf)) {
-    const modes = {};
-    for (const run of (data.runs || [])) {
-      if (run.outcome !== 'success' && run.failure_mode && !run.fix_applied) {
-        modes[run.failure_mode] = (modes[run.failure_mode] || 0) + 1;
-      }
-    }
-    for (const [mode, count] of Object.entries(modes)) {
-      if (count >= 2) {
+    const streak = getConsecutiveStreaks(data.runs || []);
+    for (const [mode, count] of Object.entries(streak)) {
+      if (count >= 3) {
         const existing = candidates.find(c => c.job_id === jobId && c.failure_mode === mode && c.status === 'pending_review');
         if (existing) {
           console.log(`Skipping ${data.name} / ${mode} — candidates already pending review`);

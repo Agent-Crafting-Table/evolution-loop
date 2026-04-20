@@ -16,13 +16,14 @@ Detect recurring failures in scheduled cron jobs and reusable skills, draft impr
 
 ```
 src/
-  trace-extract.js    # Converts raw cron logs → structured trace records
-  variant-gen.js      # Spawns claude -p to draft 2 improved prompt variants per failure mode
-  variant-test.js     # Dry-runs candidates against historical traces, cross-contamination check
-  cron-eval.js        # Static 5-gate pre-flight validator for prompt patches
-  evolution-review.js # Formats diffs for human review, applies approved variants
-  skill-log.js        # Records skill invocation outcomes, flags recurring failures
-  skill-create.js     # Creates/updates skill files, rebuilds INDEX.md
+  trace-extract.js      # Converts raw cron logs → structured trace records
+  instruction-refine.js # Auto-patches low-risk failures (3+ consecutive); escalates to variant-gen
+  variant-gen.js        # Reflexion pattern: one diagnosis + one targeted change per proposal
+  variant-test.js       # Dry-runs candidates against historical traces, cross-contamination check
+  cron-eval.js          # Static 5-gate pre-flight validator for prompt patches
+  evolution-review.js   # Posts compact diff to Discord/stdout; applies approved variants
+  skill-log.js          # Records skill invocation outcomes, flags recurring failures
+  skill-create.js       # Creates/updates skill files, rebuilds INDEX.md
 examples/
   cron-eval.json           # Example eval ruleset to copy to data/cron-eval.json
   failure-classifiers.json # Example project-specific failure classifiers
@@ -78,17 +79,27 @@ Add this to your cron schedule (daily is typical):
 
 ```bash
 node src/trace-extract.js --all --days=1
-node src/variant-gen.js --pending
-node src/evolution-review.js
+node src/instruction-refine.js --apply      # auto-patch low-risk failures
+node src/variant-gen.js --pending           # draft single-change diffs for 3+ consecutive failures
+node src/evolution-review.js                # post to Discord or stdout for human approval
 node src/skill-log.js --flag-recurring
 node src/skill-create.js --refresh-index
 ```
 
-When a variant is worth applying:
+When a variant is approved:
 
 ```bash
 node src/evolution-review.js --apply-variant <candidate-id> <variant-id>
 ```
+
+### 5. Mark job autofix levels
+
+In `crons/jobs.json`, add an `autofixLevel` field to each job:
+
+- `"autofixLevel": "safe"` — `instruction-refine.js` can auto-apply mechanical patches (utility crons: backups, health checks, status posts)
+- `"autofixLevel": "review"` (default if unset) — variants always go to human approval (dev agents, customer-facing jobs, anything that touches money)
+
+Jobs with `"critical": true` are never auto-patched regardless of `autofixLevel`.
 
 ## Workflow
 
@@ -96,13 +107,18 @@ node src/evolution-review.js --apply-variant <candidate-id> <variant-id>
 cron logs → trace-extract.js → execution-traces.json
                                        ↓
                               cron-performance.json
-                                       ↓ (2+ failures, same mode)
+                                       ↓
+                         instruction-refine.js
+                         (auto-patch low-risk, 3+ consecutive)
+                                       ↓ (medium/high-risk or review-level)
                               variant-gen.js → candidate-variants.json
+                              (Reflexion: one diagnosis + one change)
                                        ↓
                          cron-eval.js (5 static gates)
                          variant-test.js (dry-run + cross-contamination)
                                        ↓
                          evolution-review.js → human reviews diff
+                         (reply "apply <id>" / "skip <id>")
                                        ↓ (approved)
                               jobs.json updated
 ```
@@ -117,6 +133,10 @@ cron logs → trace-extract.js → execution-traces.json
 | `MAX_PER_RUN` | 3 | Max job+mode pairs per `--pending` invocation |
 | `DISCORD_POST` | — | Path to `node <script> <channel> <message>` helper |
 | `REVIEW_CHANNEL` | — | Discord channel ID for variant reviews |
+| `IMPROVEMENTS_FILE` | `memory/references/cron-improvements.md` | Human-review log for `instruction-refine.js` |
+| `PATCH_LOG_FILE` | `data/patch-log.md` | Applied-patch log for `instruction-refine.js` |
+| `MAX_PATCH_CHARS` | 500 | Max chars a single auto-patch may add |
+| `MAX_PATCHES_PER_RUN` | 3 | Max auto-patches per `--apply` invocation |
 | `SKILLS_DIR` | `memory/skills` | Where skill markdown files live |
 | `SKILL_LOG_MAX` | 100 | Rolling invocation window per skill |
 | `SKILL_LOG_FAIL_THRESHOLD` | 3 | Consecutive failures before a skill is flagged |
