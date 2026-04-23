@@ -2,7 +2,7 @@
 
 Detect recurring failures in scheduled cron jobs and reusable skills, draft improved prompts automatically via Claude, validate them statically and against historical runs, and ship them only with human approval.
 
-> Part of [The Agent Crafting Table](https://github.com/The-Agent-Crafting-Table) — standalone agent system components for Claude Code.
+> Part of [The Agent Crafting Table](https://github.com/Agent-Crafting-Table) — standalone agent system components for Claude Code.
 
 ## What This Solves
 
@@ -35,7 +35,7 @@ assets/
 
 ## Prerequisites
 
-This kit layers on top of [cron-framework](https://github.com/The-Agent-Crafting-Table/cron-framework) or an equivalent system that produces:
+This kit layers on top of [cron-framework](https://github.com/Agent-Crafting-Table/cron-framework) or an equivalent system that produces:
 
 - `crons/jobs.json` — job registry with `{ id, name, message, ... }`
 - `crons/logs/YYYY-MM-DD-<prefix>.log` — per-run logs
