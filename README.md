@@ -4,6 +4,85 @@ Detect recurring failures in scheduled cron jobs and reusable skills, draft impr
 
 > Part of [The Agent Crafting Table](https://github.com/Agent-Crafting-Table) — standalone agent system components for Claude Code.
 
+## How It Works
+
+```mermaid
+flowchart TD
+    A[cron logs
+crons/logs/*.log] --> B[trace-extract.js
+structures raw logs]
+    B --> C[execution-traces.json
++ cron-performance.json]
+    C --> D{instruction-refine.js
+check failure count}
+
+    D -->|3+ consecutive,
+autofixLevel=safe| E[Auto-patch applied
+low-risk mechanical fix]
+    D -->|medium/high risk
+or autofixLevel=review| F[variant-gen.js
+Reflexion: one diagnosis
++ one targeted change]
+
+    E --> G[jobs.json updated directly
+max 3 patches/run]
+    F --> H[candidate-variants.json
+new proposal]
+    H --> I[cron-eval.js
+5 static gates]
+    I -->|gates pass| J[variant-test.js
+dry-run + cross-contamination check]
+    I -->|gates fail| K[proposal rejected]
+    J -->|score ≥ 0.7,
+no contamination| L[evolution-review.js
+post diff to Discord]
+    J -->|score < 0.7
+or contaminated| K
+    L --> M{Human reviews diff}
+    M -->|apply| N[jobs.json updated]
+    M -->|skip| O[proposal archived]
+
+    subgraph Skills Loop
+        P[skill-log.js
+records invocation outcomes]
+        P -->|3 consecutive failures| Q[skill flagged for refinement]
+        Q --> F
+        R[skill-create.js
+rebuild INDEX.md]
+    end
+```
+
+```mermaid
+flowchart LR
+    subgraph "5 Static Gates — cron-eval.js"
+        G1[Failure patterns
+must not appear in patched msg]
+        G2[Required absent
+patterns never allowed]
+        G3[Mode-specific fix content
+must be present]
+        G4[Per-job success indicators
+must be preserved]
+        G5[Fleet-wide success signal
+HEARTBEAT_OK enforced]
+        G1 --> G2 --> G3 --> G4 --> G5
+    end
+
+    IN[candidate variant] --> G1
+    G5 -->|all pass| DRY[variant-test.js
+scoring]
+    G5 -->|any fail| REJ[rejected]
+
+    subgraph "Dry-Run Scoring"
+        DRY --> COV[Coverage score 0.0–1.0
+fraction of past failures addressed]
+        COV --> CROSS[Cross-contamination check
+against all other jobs required_absent]
+        CROSS -->|pass ≥0.7, no contamination| REVIEW[human review queue]
+        CROSS -->|fail| REJ
+    end
+```
+
 ## What This Solves
 
 - **No feedback from scoring to proposals** — scoring-only systems label jobs as broken forever. `variant-gen.js` closes the loop by drafting concrete fixes the moment a failure mode recurs.
@@ -100,28 +179,6 @@ In `crons/jobs.json`, add an `autofixLevel` field to each job:
 - `"autofixLevel": "review"` (default if unset) — variants always go to human approval (dev agents, customer-facing jobs, anything that touches money)
 
 Jobs with `"critical": true` are never auto-patched regardless of `autofixLevel`.
-
-## Workflow
-
-```
-cron logs → trace-extract.js → execution-traces.json
-                                       ↓
-                              cron-performance.json
-                                       ↓
-                         instruction-refine.js
-                         (auto-patch low-risk, 3+ consecutive)
-                                       ↓ (medium/high-risk or review-level)
-                              variant-gen.js → candidate-variants.json
-                              (Reflexion: one diagnosis + one change)
-                                       ↓
-                         cron-eval.js (5 static gates)
-                         variant-test.js (dry-run + cross-contamination)
-                                       ↓
-                         evolution-review.js → human reviews diff
-                         (reply "apply <id>" / "skip <id>")
-                                       ↓ (approved)
-                              jobs.json updated
-```
 
 ## Environment Variables
 
